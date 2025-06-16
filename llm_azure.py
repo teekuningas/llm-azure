@@ -1,13 +1,12 @@
 import os
-from typing import Iterable, Iterator, List, Union, Optional
+from typing import Iterable, Iterator, List, Union
 
 import click
 import llm
 import yaml
 from llm import EmbeddingModel, hookimpl
-from llm.default_plugins.openai_models import AsyncChat, Chat, _Shared, not_nulls, combine_chunks
+from llm.default_plugins.openai_models import AsyncChat, Chat, _Shared
 from openai import AsyncAzureOpenAI, AzureOpenAI
-from llm.utils import remove_dict_none_values
 
 DEFAULT_KEY_ALIAS = "azure"
 DEFAULT_KEY_ENV_VAR = "AZURE_OPENAI_API_KEY"
@@ -89,12 +88,15 @@ def register_embedding_models(register):
 
 
 class AzureShared(_Shared):
-    def __init__(self, model_id, model_name, api_base, api_version, attachment_types=None, can_stream=True, needs_key: str = DEFAULT_KEY_ALIAS, key_env_var: str = DEFAULT_KEY_ENV_VAR, vision=False, audio=False, reasoning=False, allows_system_prompt=True, **kwargs):
+    def __init__(self, model_id, model_name, api_base, api_version,
+                 attachment_types=None, can_stream=True,
+                 needs_key: str = DEFAULT_KEY_ALIAS,
+                 key_env_var: str = DEFAULT_KEY_ENV_VAR,
+                 vision=False, audio=False, reasoning=False,
+                 allows_system_prompt=True, **kwargs):
         self.attachment_types = attachment_types or set()
-        self.needs_key = needs_key  # Store it here
-        self.key_env_var = key_env_var  # Store it here
-
-        # Pass ALL relevant parameters, including api_base and api_version, to the base _Shared class
+        self.needs_key = needs_key
+        self.key_env_var = key_env_var
         super().__init__(
             model_id=model_id,
             model_name=model_name,
@@ -121,127 +123,11 @@ class AzureShared(_Shared):
         else:
             return AzureOpenAI(**kwargs)
 
-    def build_kwargs(self, prompt, stream):
-        kwargs = dict(not_nulls(prompt.options))
-        json_object = kwargs.pop("json_object", None)
-        if "max_tokens" not in kwargs and self.default_max_tokens is not None:
-            kwargs["max_tokens"] = self.default_max_tokens
-        if json_object:
-            kwargs["response_format"] = {"type": "json_object"}
-        if stream:
-            # For Azure OpenAI, stream_options is generally supported now
-            # https://github.com/openai/openai-python/issues/1469 was resolved.
-            kwargs["stream_options"] = {"include_usage": True}
-        return kwargs
-
-    def execute(self, prompt, stream, response, conversation=None, key=None, async_override=False):
-        messages = []
-        current_system = None
-
-        # Handle conversation history and attachments
-        if conversation is not None:
-            for prev_response in conversation.responses:
-                if prev_response.attachments:
-                    attachment_message = []
-                    if prev_response.prompt.prompt:
-                        attachment_message.append(
-                            {"type": "text", "text": prev_response.prompt.prompt}
-                        )
-                    for attachment in prev_response.attachments:
-                        attachment_message.append(_attachment(attachment))
-                    messages.append({"role": "user", "content": attachment_message})
-                else:
-                    if (
-                        prev_response.prompt.system
-                        and prev_response.prompt.system != current_system
-                    ):
-                        messages.append(
-                            {"role": "system", "content": prev_response.prompt.system},
-                        )
-                        current_system = prev_response.prompt.system
-                    messages.append(
-                        {"role": "user", "content": prev_response.prompt.prompt},
-                    )
-
-                messages.append(
-                    {"role": "assistant", "content": prev_response.text_or_raise()}
-                )
-
-        # Handle system prompt
-        if prompt.system and prompt.system != current_system:
-            messages.append({"role": "system", "content": prompt.system})
-
-        # Handle attachments for current prompt
-        if not prompt.attachments:
-            messages.append({"role": "user", "content": prompt.prompt})
-        else:
-            attachment_message = []
-            if prompt.prompt:
-                attachment_message.append({"type": "text", "text": prompt.prompt})
-            for attachment in prompt.attachments:
-                attachment_message.append(_attachment(attachment))
-            messages.append({"role": "user", "content": attachment_message})
-
-        response._prompt_json = {"messages": messages}
-        kwargs = self.build_kwargs(prompt, stream)
-        client = self.get_client(key=key, async_=async_override) # key is now passed
-
-        if async_override:
-            async def async_generator():
-                completion = await client.chat.completions.create(
-                    model=self.model_name or self.model_id,
-                    messages=messages,
-                    stream=True,
-                    **kwargs,
-                )
-                chunks = []
-                async for chunk in completion:
-                    chunks.append(chunk)
-                    content = combine_chunks(chunks)
-                    yield content["content"] # Changed this line
-                response.response_json = remove_dict_none_values(
-                    combine_chunks(chunks)
-                )
-                response.usage = response.response_json.get("usage")
-            return async_generator()
-        else: # Synchronous execution
-            completion = client.chat.completions.create(
-                model=self.model_name or self.model_id,
-                messages=messages,
-                stream=stream, # Use the stream parameter for sync calls
-                **kwargs,
-            )
-            if stream:
-                chunks = []
-                for chunk in completion:
-                    chunks.append(chunk)
-                    content = combine_chunks(chunks)
-                    yield content["content"] # Changed this line
-                response.response_json = remove_dict_none_values(
-                    combine_chunks(chunks)
-                )
-                response.usage = response.response_json.get("usage")
-            else:
-                response.response_json = remove_dict_none_values(completion.model_dump())
-                yield completion.choices[0].message.content
-
-
 class AzureChat(AzureShared, Chat):
-    def __init__(self, *args, **kwargs):
-        # AzureChat now correctly inherits from AzureShared, which handles the new parameters
-        # and passes them up to the base _Shared (and thus Chat) class.
-        super().__init__(*args, **kwargs)
-
+    pass
 
 class AzureAsyncChat(AzureShared, AsyncChat):
-    def __init__(self, *args, **kwargs):
-        # AzureAsyncChat also correctly inherits from AzureShared.
-        super().__init__(*args, **kwargs)
-
-    async def execute(self, prompt, stream, response, conversation=None, key=None):
-        async for chunk in await super().execute(prompt, stream, response, conversation, key=key, async_override=True):
-            yield chunk
-
+    pass
 
 class AzureEmbedding(EmbeddingModel):
     batch_size = 100
@@ -263,22 +149,3 @@ class AzureEmbedding(EmbeddingModel):
         }
         results = client.embeddings.create(**kwargs).data
         return ([float(r) for r in result.embedding] for result in results)
-
-
-def _attachment(attachment):
-    url = attachment.url
-    base64_content = ""
-    if not url or attachment.resolve_type().startswith("audio/"):
-        base64_content = attachment.base64_content()
-        url = f"data:{attachment.resolve_type()};base64,{base64_content}"
-    if attachment.resolve_type().startswith("image/"):
-        return {"type": "image_url", "image_url": {"url": url}}
-    else:
-        format_ = "wav" if attachment.resolve_type() == "audio/wav" else "mp3"
-        return {
-            "type": "input_audio",
-            "input_audio": {
-                "data": base64_content,
-                "format": format_,
-            },
-        }
